@@ -18,6 +18,7 @@ package streamlog
 
 import (
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -49,6 +50,59 @@ func benchmarkStreamLoggerSendParallel(b *testing.B, subscribe bool) {
 	})
 	b.StopTimer()
 	runtime.KeepAlive(logger)
+}
+
+func TestStreamLoggerSubscriberLifecycle(t *testing.T) {
+	logger := New[*logMessage]("subscriber-lifecycle", 1)
+	first := &logMessage{val: "first"}
+	second := &logMessage{val: "second"}
+
+	// An empty logger must accept a send, and a completed subscription must
+	// receive later messages synchronously through its buffered channel.
+	logger.Send(first)
+	ch := logger.Subscribe("test")
+	logger.Send(first)
+	if got := <-ch; got != first {
+		t.Fatalf("received %p, want %p", got, first)
+	}
+
+	logger.Unsubscribe(ch)
+	logger.Send(second)
+	select {
+	case got := <-ch:
+		t.Fatalf("received %p after unsubscribe", got)
+	default:
+	}
+}
+
+func TestStreamLoggerConcurrentSendAndSubscription(t *testing.T) {
+	logger := New[*logMessage]("concurrent-lifecycle", 1)
+	messages := [2]*logMessage{{val: "select 1"}, {val: "select 2"}}
+	start := make(chan struct{})
+	stop := make(chan struct{})
+
+	var senders sync.WaitGroup
+	for range 4 {
+		senders.Go(func() {
+			<-start
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					logger.Send(messages[i&1])
+				}
+			}
+		})
+	}
+
+	close(start)
+	for range 100 {
+		ch := logger.Subscribe("test")
+		logger.Unsubscribe(ch)
+	}
+	close(stop)
+	senders.Wait()
 }
 
 func BenchmarkStreamLoggerSendNoSubscribersParallel(b *testing.B) {
