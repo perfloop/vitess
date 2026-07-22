@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -124,10 +125,11 @@ func registerStreamLogFlags(fs *pflag.FlagSet) {
 // StreamLogger is a non-blocking broadcaster of messages.
 // Subscribers can use channels or HTTP.
 type StreamLogger[T any] struct {
-	name       string
-	size       int
-	mu         sync.Mutex
-	subscribed map[chan T]string
+	name            string
+	size            int
+	mu              sync.Mutex
+	subscribed      map[chan T]string
+	subscriberCount atomic.Int32
 }
 
 // LogFormatter is the function signature used to format an arbitrary
@@ -158,6 +160,11 @@ func shouldEmitLogOnCondition(aCond bool, aReason string, allMatches bool, reaso
 // Send sends message to all the writers subscribed to logger. Calling
 // Send does not block.
 func (logger *StreamLogger[T]) Send(message T) {
+	if logger.subscriberCount.Load() == 0 {
+		sendCount.Add(logger.name, 1)
+		return
+	}
+
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 
@@ -180,6 +187,7 @@ func (logger *StreamLogger[T]) Subscribe(name string) chan T {
 
 	ch := make(chan T, logger.size)
 	logger.subscribed[ch] = name
+	logger.subscriberCount.Add(1)
 	return ch
 }
 
@@ -188,7 +196,10 @@ func (logger *StreamLogger[T]) Unsubscribe(ch chan T) {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 
-	delete(logger.subscribed, ch)
+	if _, ok := logger.subscribed[ch]; ok {
+		delete(logger.subscribed, ch)
+		logger.subscriberCount.Add(-1)
+	}
 }
 
 // Name returns the name of StreamLogger.
